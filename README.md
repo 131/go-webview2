@@ -1,6 +1,17 @@
 [![Go](https://github.com/jchv/go-webview2/actions/workflows/go.yml/badge.svg)](https://github.com/jchv/go-webview2/actions/workflows/go.yml) [![Go Report Card](https://goreportcard.com/badge/github.com/jchv/go-webview2)](https://goreportcard.com/report/github.com/jchv/go-webview2) [![Go Reference](https://pkg.go.dev/badge/github.com/jchv/go-webview2.svg)](https://pkg.go.dev/github.com/jchv/go-webview2)
 
 # go-webview2
+
+This is the explicitly maintained `131/go-webview2` fork of `jchv/go-webview2`.
+It adds host-owned browser lifetime through Microsoft's supported controller
+API, not modifications to Chromium. See [lifetime contract and alternatives](LIFECYCLE.md)
+for the motivation, API scope, tests, and limitations.
+
+The original module path is retained for compatibility. Consumers can use a
+version-pinned **remote** Go module replacement after a fork revision is
+published; this is a dependency fork, not unmodified vendoring. No loader or SDK
+assets are modified here.
+
 This package provides an interface for using the Microsoft Edge WebView2 component with Go. It is based on [webview/webview](https://github.com/webview/webview) and provides a compatible API.
 
 Please note that this package only supports Windows, since it provides functionality specific to WebView2. If you wish to use this library for Windows, but use webview/webview for all other operating systems, you could use the [go-webview-selector](https://github.com/jchv/go-webview-selector) package instead. However, you will not be able to use WebView2-specific functionality.

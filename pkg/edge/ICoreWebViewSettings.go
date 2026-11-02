@@ -394,3 +394,8 @@ func (i *ICoreWebViewSettings) PutIsSwipeNavigationEnabled(enabled bool) error {
 	}
 	return nil
 }
+
+// Release relinquishes the reference returned by GetSettings.
+func (i *ICoreWebViewSettings) Release() {
+	i.vtbl.Release.Call(uintptr(unsafe.Pointer(i)))
+}

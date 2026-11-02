@@ -1,6 +1,7 @@
 package edge
 
 import (
+	"fmt"
 	"unsafe"
 
 	"github.com/jchv/go-webview2/internal/w32"
@@ -83,14 +84,9 @@ func (i *ICoreWebView2Controller) AddAcceleratorKeyPressed(eventHandler *ICoreWe
 }
 
 func (i *ICoreWebView2Controller) PutIsVisible(isVisible bool) error {
-	var err error
-
-	_, _, err = i.vtbl.PutIsVisible.Call(
-		uintptr(unsafe.Pointer(i)),
-		uintptr(boolToInt(isVisible)),
-	)
-	if err != windows.ERROR_SUCCESS {
-		return err
+	r, _, _ := i.vtbl.PutIsVisible.Call(uintptr(unsafe.Pointer(i)), uintptr(boolToInt(isVisible)))
+	if int32(r) < 0 {
+		return fmt.Errorf("set WebView2 visibility: HRESULT %#x", uint32(r))
 	}
 	return nil
 }
@@ -127,6 +123,17 @@ func (i *ICoreWebView2Controller) MoveFocus(reason uintptr) error {
 	)
 	if err != windows.ERROR_SUCCESS {
 		return err
+	}
+	return nil
+}
+
+// Close closes this controller using WebView2's supported lifetime API.
+// Call on the thread that created the controller. Owned COM references must
+// still be released by their owner after a successful Close.
+func (i *ICoreWebView2Controller) Close() error {
+	r, _, _ := i.vtbl.Close.Call(uintptr(unsafe.Pointer(i)))
+	if int32(r) < 0 {
+		return fmt.Errorf("close WebView2: HRESULT %#x", uint32(r))
 	}
 	return nil
 }

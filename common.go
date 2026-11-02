@@ -41,6 +41,17 @@ type WebView interface {
 	// Destroy destroys a webview and closes the native window.
 	Destroy()
 
+	// Show makes the embedded browser visible after its parent was created hidden.
+	Show() error
+
+	// Close releases the browser and destroys its window without quitting the
+	// host's message loop. Call on the UI thread; safe to call more than once.
+	Close() error
+
+	// ProcessDispatch drains binding completions from a host-owned message loop.
+	// Call on the UI thread for WM_APP and after native modal loops.
+	ProcessDispatch()
+
 	// Window returns a native window handle pointer. When using GTK backend the
 	// pointer is GtkWindow pointer, when using Cocoa backend the pointer is
 	// NSWindow pointer, when using Win32 backend the pointer is HWND pointer.

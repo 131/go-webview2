@@ -4,6 +4,7 @@
 package edge
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -20,6 +21,8 @@ type Chromium struct {
 	controller            *ICoreWebView2Controller
 	webview               *ICoreWebView2
 	inited                uintptr
+	initErr               error
+	closed                bool
 	envCompleted          *iCoreWebView2CreateCoreWebView2EnvironmentCompletedHandler
 	controllerCompleted   *iCoreWebView2CreateCoreWebView2ControllerCompletedHandler
 	webMessageReceived    *iCoreWebView2WebMessageReceivedEventHandler
@@ -104,10 +107,17 @@ func (e *Chromium) Embed(hwnd uintptr) bool {
 			0,
 		)
 		if r == 0 {
-			break
+			w32.User32PostQuitMessage.Call(msg.WParam)
+			return false
+		}
+		if int32(r) < 0 {
+			return false
 		}
 		_, _, _ = w32.User32TranslateMessage.Call(uintptr(unsafe.Pointer(&msg)))
 		_, _, _ = w32.User32DispatchMessageW.Call(uintptr(unsafe.Pointer(&msg)))
+	}
+	if e.initErr != nil || e.closed || e.webview == nil {
+		return false
 	}
 	e.Init("window.external={invoke:s=>window.chrome.webview.postMessage(s)}")
 	return true
@@ -169,35 +179,44 @@ func (e *Chromium) Release() uintptr {
 }
 
 func (e *Chromium) EnvironmentCompleted(res uintptr, env *ICoreWebView2Environment) uintptr {
-	if int64(res) < 0 {
-		log.Fatalf("Creating environment failed with %08x", res)
+	if e.closed {
+		return 0
+	}
+	if int32(res) < 0 || env == nil {
+		return e.failInitialization("environment", res)
 	}
 	_, _, _ = env.vtbl.AddRef.Call(uintptr(unsafe.Pointer(env)))
 	e.environment = env
 
-	_, _, _ = env.vtbl.CreateCoreWebView2Controller.Call(
+	r, _, _ := env.vtbl.CreateCoreWebView2Controller.Call(
 		uintptr(unsafe.Pointer(env)),
 		e.hwnd,
 		uintptr(unsafe.Pointer(e.controllerCompleted)),
 	)
+	if int32(r) < 0 {
+		return e.failInitialization("controller request", r)
+	}
 	return 0
 }
 
 func (e *Chromium) CreateCoreWebView2ControllerCompleted(res uintptr, controller *ICoreWebView2Controller) uintptr {
-	if int64(res) < 0 {
-		log.Fatalf("Creating controller failed with %08x", res)
+	if e.closed {
+		return 0
+	}
+	if int32(res) < 0 || controller == nil {
+		return e.failInitialization("controller", res)
 	}
 	_, _, _ = controller.vtbl.AddRef.Call(uintptr(unsafe.Pointer(controller)))
 	e.controller = controller
 
 	var token _EventRegistrationToken
-	_, _, _ = controller.vtbl.GetCoreWebView2.Call(
+	r, _, _ := controller.vtbl.GetCoreWebView2.Call(
 		uintptr(unsafe.Pointer(controller)),
 		uintptr(unsafe.Pointer(&e.webview)),
 	)
-	_, _, _ = e.webview.vtbl.AddRef.Call(
-		uintptr(unsafe.Pointer(e.webview)),
-	)
+	if int32(r) < 0 || e.webview == nil {
+		return e.failInitialization("webview", r)
+	}
 	_, _, _ = e.webview.vtbl.AddWebMessageReceived.Call(
 		uintptr(unsafe.Pointer(e.webview)),
 		uintptr(unsafe.Pointer(e.webMessageReceived)),
@@ -358,4 +377,48 @@ func (e *Chromium) Focus() {
 		return
 	}
 	_ = e.controller.MoveFocus(COREWEBVIEW2_MOVE_FOCUS_REASON_PROGRAMMATIC)
+}
+
+// Close disconnects event handlers and releases every COM reference owned by
+// Chromium. GetCoreWebView2 already returns an owned reference; the environment
+// and controller callbacks instead lend their arguments, which we AddRef.
+func (e *Chromium) Close() error {
+	if e.closed {
+		return nil
+	}
+	e.closed = true
+	if e.controller != nil {
+		if err := e.controller.Close(); err != nil {
+			e.closed = false
+			return err
+		}
+	}
+	if e.webview != nil {
+		e.webview.vtbl.Release.Call(uintptr(unsafe.Pointer(e.webview)))
+		e.webview = nil
+	}
+	if e.controller != nil {
+		e.controller.vtbl.Release.Call(uintptr(unsafe.Pointer(e.controller)))
+		e.controller = nil
+	}
+	if e.environment != nil {
+		e.environment.vtbl.Release.Call(uintptr(unsafe.Pointer(e.environment)))
+		e.environment = nil
+	}
+	e.MessageCallback = nil
+	e.WebResourceRequestedCallback = nil
+	e.NavigationCompletedCallback = nil
+	e.AcceleratorKeyCallback = nil
+	atomic.StoreUintptr(&e.inited, 1)
+	return nil
+}
+
+// HRESULT is a signed 32-bit value even on 64-bit Windows. Completion errors
+// and cancelled initialization return to the owner instead of terminating it
+// or dereferencing a null controller in a late native callback.
+func (e *Chromium) failInitialization(stage string, result uintptr) uintptr {
+	e.initErr = fmt.Errorf("initialize WebView2 %s: HRESULT %#x", stage, uint32(result))
+	log.Print(e.initErr)
+	atomic.StoreUintptr(&e.inited, 1)
+	return 0
 }

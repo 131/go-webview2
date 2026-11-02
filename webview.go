@@ -21,6 +21,7 @@ import (
 var (
 	windowContext     = map[uintptr]interface{}{}
 	windowContextSync sync.RWMutex
+	windowProc        = windows.NewCallback(wndproc)
 )
 
 func getWindowContext(wnd uintptr) interface{} {
@@ -36,6 +37,8 @@ func setWindowContext(wnd uintptr, data interface{}) {
 }
 
 type browser interface {
+	Show() error
+	Close() error
 	Embed(hwnd uintptr) bool
 	Resize()
 	Navigate(url string)
@@ -56,9 +59,13 @@ type webview struct {
 	m          sync.Mutex
 	bindings   map[string]interface{}
 	dispatchq  []func()
+	closed     bool
 }
 
 type WindowOptions struct {
+	// Hidden creates the window and controller hidden. Show the native parent,
+	// then call WebView.Show on the creating thread to publish the browser.
+	Hidden bool
 	Title  string
 	Width  uint
 	Height uint
@@ -107,13 +114,23 @@ func NewWithOptions(options WebViewOptions) WebView {
 	w.browser = chromium
 	w.mainthread, _, _ = w32.Kernel32GetCurrentThreadID.Call()
 	if !w.CreateWithOptions(options.WindowOptions) {
+		w.Close()
 		return nil
 	}
 
+	// The controller can start logically visible under a hidden HWND. Hide it
+	// explicitly so publication performs a real false-to-true transition.
+	if options.WindowOptions.Hidden {
+		if err := chromium.Hide(); err != nil {
+			w.Close()
+			return nil
+		}
+	}
 	settings, err := chromium.GetSettings()
 	if err != nil {
 		log.Fatal(err)
 	}
+	defer settings.Release()
 	// disable context menu
 	err = settings.PutAreDefaultContextMenusEnabled(options.Debug)
 	if err != nil {
@@ -240,7 +257,9 @@ func wndproc(hwnd, msg, wp, lp uintptr) uintptr {
 		case w32.WMClose:
 			_, _, _ = w32.User32DestroyWindow.Call(hwnd)
 		case w32.WMDestroy:
-			w.Terminate()
+			if !w.isClosed() {
+				w.Terminate()
+			}
 		case w32.WMGetMinMaxInfo:
 			lpmmi := (*w32.MinMaxInfo)(unsafe.Pointer(lp))
 			if w.maxsz.X > 0 && w.maxsz.Y > 0 {
@@ -288,7 +307,7 @@ func (w *webview) CreateWithOptions(opts WindowOptions) bool {
 		LpszClassName: className,
 		HIcon:         windows.Handle(icon),
 		HIconSm:       windows.Handle(icon),
-		LpfnWndProc:   windows.NewCallback(wndproc),
+		LpfnWndProc:   windowProc,
 	}
 	_, _, _ = w32.User32RegisterClassExW.Call(uintptr(unsafe.Pointer(&wc)))
 
@@ -333,9 +352,11 @@ func (w *webview) CreateWithOptions(opts WindowOptions) bool {
 	)
 	setWindowContext(w.hwnd, w)
 
-	_, _, _ = w32.User32ShowWindow.Call(w.hwnd, w32.SWShow)
-	_, _, _ = w32.User32UpdateWindow.Call(w.hwnd)
-	_, _, _ = w32.User32SetFocus.Call(w.hwnd)
+	if !opts.Hidden {
+		_, _, _ = w32.User32ShowWindow.Call(w.hwnd, w32.SWShow)
+		_, _, _ = w32.User32UpdateWindow.Call(w.hwnd)
+		_, _, _ = w32.User32SetFocus.Call(w.hwnd)
+	}
 
 	if !w.browser.Embed(w.hwnd) {
 		return false
@@ -358,13 +379,7 @@ func (w *webview) Run() {
 			0,
 		)
 		if msg.Message == w32.WMApp {
-			w.m.Lock()
-			q := append([]func(){}, w.dispatchq...)
-			w.dispatchq = []func(){}
-			w.m.Unlock()
-			for _, v := range q {
-				v()
-			}
+			w.ProcessDispatch()
 		} else if msg.Message == w32.WMQuit {
 			return
 		}
@@ -437,11 +452,17 @@ func (w *webview) Init(js string) {
 }
 
 func (w *webview) Eval(js string) {
-	w.browser.Eval(js)
+	if !w.isClosed() {
+		w.browser.Eval(js)
+	}
 }
 
 func (w *webview) Dispatch(f func()) {
 	w.m.Lock()
+	if w.closed {
+		w.m.Unlock()
+		return
+	}
 	w.dispatchq = append(w.dispatchq, f)
 	w.m.Unlock()
 	_, _, _ = w32.User32PostThreadMessageW.Call(w.mainthread, w32.WMApp, 0, 0)
@@ -479,4 +500,54 @@ func (w *webview) Bind(name string, f interface{}) error {
 	})()`)
 
 	return nil
+}
+
+func (w *webview) isClosed() bool {
+	w.m.Lock()
+	defer w.m.Unlock()
+	return w.closed
+}
+
+// Close leaves the native host alive. Clear queued completions and the HWND
+// context so a newly created WebView cannot inherit work or retain the old one.
+func (w *webview) Close() error {
+	if w.isClosed() {
+		return nil
+	}
+	if err := w.browser.Close(); err != nil {
+		return err
+	}
+	w.m.Lock()
+	w.closed = true
+	w.dispatchq = nil
+	w.bindings = nil
+	w.m.Unlock()
+	if w.hwnd != 0 {
+		w32.User32DestroyWindow.Call(w.hwnd)
+		windowContextSync.Lock()
+		delete(windowContext, w.hwnd)
+		windowContextSync.Unlock()
+		w.hwnd = 0
+	}
+	return nil
+}
+
+func (w *webview) ProcessDispatch() {
+	w.m.Lock()
+	queue := w.dispatchq
+	w.dispatchq = nil
+	w.m.Unlock()
+	for _, f := range queue {
+		if w.isClosed() {
+			return
+		}
+		f()
+	}
+}
+
+func (w *webview) Show() error {
+	if w.isClosed() {
+		return errors.New("webview is closed")
+	}
+	return w.browser.Show()
 }
