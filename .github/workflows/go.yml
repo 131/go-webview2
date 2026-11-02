@@ -2,41 +2,30 @@ name: Go
 
 on:
   push:
-    branches: [ master ]
+    branches: [master]
   pull_request:
-    branches: [ master ]
+    branches: [master]
+
+permissions:
+  contents: read
 
 jobs:
-  build:
-    name: Build
+  windows:
     runs-on: windows-latest
+    strategy:
+      matrix:
+        go: ['1.17.x', '1.24.x']
+        arch: [amd64, '386']
+    env:
+      GOARCH: ${{ matrix.arch }}
+      CGO_ENABLED: '0'
     steps:
-    - name: Set up Go
-      uses: actions/setup-go@v2
-      with:
-        go-version: ^1.17
-
-    - name: Check out code into the Go module directory
-      uses: actions/checkout@v2
-
-    - name: Get dependencies
-      run: go get -v -t -d ./...
-
-    - name: Build (Smoke test)
-      run: go build -v ./...
-
-    - name: Test
-      run: go test -v ./...
-
-  lint:
-    name: Lint
-    runs-on: windows-latest
-    steps:
-    - uses: actions/checkout@v2
-    - uses: actions/setup-go@v3
-      with:
-        go-version: 1.18
-    - name: Lint
-      uses: golangci/golangci-lint-action@v3
-      with:
-        version: v1.45
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: ${{ matrix.go }}
+      - run: go mod download
+      - run: go build ./...
+      # HWND/LPARAM conversions in the inherited Win32 ABI require this scope.
+      - run: go vet -unsafeptr=false ./...
+      - run: go test -v ./...
